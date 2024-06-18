@@ -1,0 +1,725 @@
+---
+title: "Th Stopping in Philadelphia Puerto Rican English"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    df_print: paged
+---
+# Setup
+## Set random seed
+
+This ensures that all results are replicable
+```{r}
+set.seed(5241988)
+```
+
+## Load Packages
+
+Define a function that will take a list of required packages, install any that are missing, and add all packages to the local workspace:
+
+```{r}
+get_packages<-function(package_list){
+  # Install packages not yet installed
+  installed_packages <- package_list %in% rownames(installed.packages())
+  if (any(installed_packages == FALSE)) {
+    install.packages(package_list[!installed_packages])
+  }
+  # Packages loading
+  invisible(lapply(package_list, require, character.only = TRUE))}
+```
+
+Apply to the package list for this analysis:
+
+```{r, print=FALSE,warning=FALSE,results=FALSE}
+packages<-c('dplyr','tidyr','magrittr','ggplot2','statcomp','bayesplot','rstanarm','bayestestR','BayesFactor','irr','gridExtra','parallel','shinystan')
+get_packages(packages)
+```
+
+Set some environmental variables:
+
+```{r, results=FALSE}
+options(mc.cores=detectCores())
+test_regex="^scale.*|^\\(Int.*"
+regex="^\\(Int|^Age.*|^Sex.*|^Birth.*|^s\\(B.*"
+my_probs=c(0.0275,0.5,0.975)
+```
+
+## Set up Workspace
+
+### Set Session Variables
+
+Set color scheme and line types for tokens
+
+```{r, results=FALSE}
+voiced_col<-RColorBrewer::brewer.pal(4, "Paired")[1]
+voiced_col_alt<-RColorBrewer::brewer.pal(4, "Paired")[2]
+voiceless_col<-RColorBrewer::brewer.pal(4, "Paired")[3]
+voiceless_col_alt<-RColorBrewer::brewer.pal(4, "Paired")[4]
+male_col<-RColorBrewer::brewer.pal(4, "Accent")[2]
+female_col<-RColorBrewer::brewer.pal(4, "Accent")[3]
+female_line<-'solid'
+male_line<-'dashed'
+```
+
+### Set Plot Theme
+
+Set general theme for plots
+
+```{r, results=FALSE}
+theme_set(theme_minimal()+
+            theme(plot.title = element_text(size=22),
+                  legend.key.size = unit(1,"cm"),
+                  legend.text = element_text(size=12),
+                  legend.title = element_text(size=15),
+                  panel.spacing=unit(2,"lines"),
+                  panel.background=element_rect(color='black'),
+                  strip.text=element_text(color='black',size=18),
+                  axis.text=element_text(color='black',size=12),
+                  axis.title=element_text(color='black',size=15)))
+```
+
+### Pre-load models
+By default, the chunks in this notebook that pertain to the statistical analysis have been set not to evaluate. This will load all models to the workspace so they can be queried without having to wait for them to run.
+```{r}
+load('../Data/all_models_final.RData')
+```
+
+# Test Set Data
+
+By default, we'll assume that the script hasn't been moved from its original location and that all data files are in the same directory as this script. If that's not true, use `setwd()` to change the working directory first.
+
+## Data Processing
+
+Load in test set and process
+
+```{r}
+test_set=read.delim('../Data/testset_results.txt')
+process_test_set=function(data){
+  data$Speaker=with(data,factor(ifelse(substr(File,1,1)=='A',"A","G")))
+  data$File=as.factor(data$File)
+  data$Phone=as.factor(data$Phone)
+  data$Word=as.factor(data$Word)
+  data$Mean_HNR=as.numeric(data$Mean_HNR)
+  return(data)}
+test_set %<>% process_test_set()
+```
+
+Divide into voiceless and voiced
+
+```{r}
+voiced_test_set<-test_set %>% filter(.,Phone=='DH'|Phone=='D') %>% droplevels()
+voiceless_test_set<-test_set %>% filter(.,Phone=="TH"|Phone=="T") %>% droplevels()
+voiced_test_set$Phone<-relevel(voiced_test_set$Phone,ref="DH")
+voiceless_test_set$Phone<-relevel(voiceless_test_set$Phone,ref="TH")
+```
+
+## Data Visualization
+
+```{r}
+phones<-rev(c('/θ/','/t/','/ð/','/d/'))
+cog<-ggplot(test_set,aes(y=Phone,x=CoG,fill=Phone))+geom_violin()+stat_summary(geom='errorbar',width=0.25,fun.data='mean_cl_boot')+scale_fill_brewer(palette='Paired')+scale_y_discrete(labels=phones)+coord_cartesian(xlim=c(0,1500))+theme(legend.position='none')+labs(x="Center of Gravity")
+skew<-ggplot(test_set,aes(x=Skewness,y=Phone,fill=Phone))+geom_violin()+stat_summary(geom='errorbar',width=0.25,fun.data='mean_cl_boot')+scale_fill_brewer(palette='Paired')+scale_y_discrete(labels=phones)+coord_cartesian(xlim=c(0,25))+theme(legend.position='none')
+kur<-ggplot(test_set,aes(x=Kurtosis,y=Phone,fill=Phone))+geom_violin()+stat_summary(geom='errorbar',width=0.25,fun.data='mean_cl_boot')+scale_fill_brewer(palette='Paired')+scale_y_discrete(labels=phones)+coord_cartesian(xlim=c(0,500))+theme(legend.position='none')
+hnr<-ggplot(test_set,aes(x=Mean_HNR,y=Phone,fill=Phone))+geom_violin()+stat_summary(geom='errorbar',width=0.25,fun.data='mean_cl_boot')+scale_fill_brewer(palette='Paired')+scale_y_discrete(labels=phones)+theme(legend.position='none')+labs(x="Mean HNR")
+grid.arrange(cog,hnr,skew,kur)->figure1
+```
+
+## Data Analysis
+
+### Run models
+
+#### Voiceless Data
+
+```{r, results='hide',eval=F}
+ms_testset=stan_glmer(Phone~scale(Mean_HNR)+scale(CoG)+scale(Skewness)+scale(Kurtosis)+(1|Speaker),voiceless_test_set,family='binomial',adapt_delta=0.99,warmup=2000,iter=6000,chains=8)
+ms_testset_loo<-loo(ms_testset,k_threshold=0.7)
+```
+
+#### Voiced Data
+
+```{r, results='hide',eval=F}
+mv_testset=stan_glmer(Phone~scale(Mean_HNR)+scale(CoG)+scale(Skewness)+scale(Kurtosis)+(1|Speaker),voiced_test_set,family='binomial',adapt_delta=0.99,warmup=2000,iter=6000,chains=8)
+mv_testset_loo<-loo(mv_testset,k_threshold=0.7)
+```
+
+### View Results
+
+#### Model Summary
+
+```{r}
+summary(ms_testset,regex_pars=test_regex,probs=my_probs,digits=3)
+```
+
+```{r}
+summary(mv_testset,regex_pars=test_regex,probs=my_probs,digits=3)
+```
+#### HDIs and Bayes Factors
+
+```{r}
+print("Voiceless Data:")
+hdi(ms_testset)
+bayesfactor(ms_testset)
+```
+```{r}
+print("Voiced Data:")
+hdi(mv_testset)
+bayesfactor(mv_testset)
+```
+
+
+
+#### Posterior Draws
+
+```{r}
+color_scheme_set(c(voiceless_col,rep("#000000",5)))
+ms_testset_post<-mcmc_areas(ms_testset,regex_pars=test_regex,prob_outer=0.95)+ggtitle("Voiceless")+scale_y_discrete(labels=c("Intercept","Mean HNR","CoG","Skewness","Kurtosis"))+geom_vline(xintercept=0,linetype='dotted')+labs(x="Stop Likelihood")
+color_scheme_set(c(voiced_col,rep("#000000",5)))
+mv_testset_post<-mcmc_areas(mv_testset,regex_pars=test_regex,prob_outer=0.95)+ggtitle("Voiced")+scale_y_discrete(labels=c("Intercept","Mean HNR","CoG","Skewness","Kurtosis"))+geom_vline(xintercept=0,linetype='dotted')+labs(x="Stop Likelihood")
+grid.arrange(ms_testset_post,mv_testset_post,ncol=2)->figure2
+```
+
+#### Region of Practical Equivalence (ROPE)
+
+```{r,warning=FALSE}
+ms_testset_rope<-plot(rope(ms_testset,range=rope_range(ms_testset),ci_method='hdi'),alpha=0.75)+ggtitle("Voiceless")+scale_fill_manual(values=c(voiceless_col,voiceless_col_alt))
+mv_testset_rope<-plot(rope(mv_testset,range=rope_range(mv_testset),ci_method='hdi'),alpha=0.75)+ggtitle("Voiced")+scale_fill_manual(values=c(voiced_col,voiced_col_alt))
+grid.arrange(ms_testset_rope,mv_testset_rope,ncol=1)
+```
+
+#### Shinystan App (will open in new browser if code is run)
+
+```{r, eval=FALSE}
+launch_shinystan(ms_testset)
+```
+
+```{r,eval=FALSE}
+launch_shinystan(mv_testset)
+```
+
+# PREP Data
+
+PREP = Puerto Rican English in Philadelphia Corpus
+
+[More info](https://osf.io/7km4r/)
+
+## Data Processing
+
+### Load Data from Sources
+
+By default, we'll assume that the script hasn't been moved from its original location and that all data files are in the same directory as this script. If that's not true, use `setwd()` to change the working directory first.
+
+```{r}
+prep_data=read.delim('../Data/prep_data.txt')
+socio_data=read.csv('../Data/prep_socio.csv')
+perceptual_data=read.delim('../Data/perceptual_data.txt')
+perceptual_tokens_voicing_codes=read.delim('../Data/voicing_codes.txt')
+```
+
+### Process Data
+
+Start by getting phonetic context
+
+```{r}
+prep_data$FollowingStress=as.factor(with(prep_data,substr(FollowingPhone,nchar(FollowingPhone),nchar(FollowingPhone))))
+prep_data$FollowingVowel=as.factor(with(prep_data,substr(FollowingPhone,1,nchar(FollowingPhone)-1)))
+prep_data$FollowingPhone=as.factor(prep_data$FollowingPhone)
+```
+
+Remove tokens that aren't prevocalic (i.e., are consonant clusters)
+
+```{r}
+prep_data %<>% filter(!(FollowingPhone %in% list('R','W','Y'))) 
+prep_data %<>% mutate(Voicing=if_else(Phone %in% list('D','DH'),'Voiced','Voiceless'),Manner=if_else(Phone %in% list('D','T'),'Stop','Fricative'),Metric=if_else(Voicing=='Voiced','Mean_HNR','Skewness'))
+```
+
+Join to sociodemographic data and specify data structure
+
+```{r,warning=FALSE}
+prep_data %>% left_join(.,socio_data, by=c('File'='Speaker'))->prep_socio # Merge socio data with speaker data
+prep_socio$Sex=as.factor(prep_socio$Sex)
+prep_socio$Mean_HNR=as.numeric(prep_socio$Mean_HNR)
+prep_socio$File=as.factor(prep_socio$File)
+prep_socio$Word=gsub("\\(\\(","",prep_socio$Word)
+prep_socio$Word=gsub("\\)\\)","",prep_socio$Word)
+prep_socio$Word=as.factor(prep_socio$Word)
+prep_socio$Phone=as.factor(prep_socio$Phone)
+prep_socio %<>% mutate(AgeGroup=if_else(BirthYear>=1985,'Younger','Older'),Speaker=File)
+```
+
+Get average values by speaker, voicing, and phonetic context
+
+```{r,warning=FALSE}
+prep_data$PrecedingPhone=as.factor(prep_data$PrecedingPhone)
+prep_data$PrecedingWord=as.factor(prep_data$PrecedingWord)
+prep_data$Skewness=as.numeric(prep_data$Skewness)
+prep_data$Mean_HNR=as.numeric(prep_data$Mean_HNR)
+
+speaker_avgs<-prep_data %>% filter(Phone=='D' | Phone=='T') %>% 
+  group_by(File, Phone, FollowingVowel, FollowingStress) %>% 
+  reframe(count=n(),HNR_stop=mean(na.omit(Mean_HNR)),sd_HNR_stop=sd(na.omit(Mean_HNR)), skewness_stop=mean(na.omit(Skewness)),sd_skewness_stop=sd(na.omit(Skewness))) %>%
+  ungroup()
+
+voiced_avgs<-speaker_avgs %>% filter(Phone=='D') %>% select(-Phone)
+voiceless_avgs<-speaker_avgs %>% filter(Phone=='T') %>% select(-Phone)
+```
+
+Functions to calculate normalized stopping ratios and remove outliers \>3 standard deviations from the group mean, by speaker.
+
+```{r}
+make_stopping_ratios<-function(data,p){
+  data %<>% filter(Phone==p) %>% 
+  left_join(voiced_avgs,by=c('File','FollowingVowel','FollowingStress')) %>% 
+  mutate(HNR_ratio=Mean_HNR/HNR_stop,skewness_ratio=Skewness/skewness_stop) %>%
+  mutate(ratio=(if_else(Phone=='TH',skewness_ratio,if_else(Phone=="DH",HNR_ratio,NA)))) %>%
+  left_join(socio_data,by=c('File'='Speaker')) %>% rename(Speaker=File) %>%
+  mutate(AgeGroup=as.factor(ifelse(BirthYear>=1985,'Younger','Older')))
+  return(data)
+}
+
+remove_outliers<-function(data){
+  data %>% filter(!is.na(ratio)) %>% mutate(Pseudonym=ifelse(.$Speaker=='S39','Carina',.$Pseudonym))%>%
+    mutate(mean_ratio_byspeaker=mean(ratio),sd_ratio_byspeaker=sd(ratio)) %>%
+    ungroup() %>%
+    filter(abs(ratio-mean_ratio_byspeaker)<=3*sd_ratio_byspeaker) %>%
+    filter(abs(ratio-mean(ratio))<=3*sd(ratio))->result
+  print(paste0("Removed ",nrow(data)-nrow(result)," rows, or ",round(100*(1-nrow(result)/nrow(data)),2),"% of data."))
+  return(result)
+}
+```
+
+Apply to data and create production dataset
+
+```{r,warning=FALSE}
+voiceless<-make_stopping_ratios(prep_data,"TH") %>% remove_outliers()
+voiced<-make_stopping_ratios(prep_data,"DH") %>% remove_outliers()
+production_data<-rbind(voiced,voiceless)
+```
+
+## Data Visualization
+
+### Data distribution
+
+```{r, echo=T,fig.keep='all'}
+production_data %>% group_by(Word,Phone) %>% summarise(count=n()) %>% arrange(desc(count)) %>%  {.->> word_cts} %>%
+  ggplot(.,aes(x=count))+geom_density()+scale_x_continuous(breaks=seq(0,500,by=50))+coord_cartesian(xlim=c(0,500))+ggtitle("Word Distribution")
+
+```
+
+Note that only 2 of the top 10 words are /θ/ words (think,things)
+
+```{r}
+word_cts %>%
+  filter(count>=40&(Phone=='DH'|Phone=='TH')) %>% 
+  arrange(desc(count)) %>% 
+  head(20) 
+```
+
+Top 10 /ð/ words
+```{r}
+word_cts %>%
+  filter(Phone=='DH') %>% 
+  arrange(desc(count)) %>% 
+  head(10) 
+```
+
+Top 10 /θ/ words
+```{r}
+word_cts %>%
+  filter(Phone=='TH') %>% 
+  arrange(desc(count)) %>% 
+  head(10) 
+```
+
+
+Visualize distribution of fricatives and stops across data by metric
+
+```{r,fig.keep='all'}
+
+ggplot(prep_socio,aes(x=if_else(Voicing=='Voiced',Mean_HNR,Skewness),fill=Manner))+
+  geom_density(alpha=0.5)+facet_grid(Voicing~.)+
+  labs(x="Metric",y="Density")+scale_fill_viridis_d(option='cividis',begin=0.3,end=0.9)+theme(legend.position='bottom')
+
+ggplot(prep_socio,aes(x=if_else(Voicing=='Voiced',Mean_HNR,Skewness),fill=Manner))+
+  geom_density(alpha=0.5)+facet_grid(Voicing~Sex)+
+  labs(x="Metric",y="Density")+scale_fill_viridis_d(option='viridis',begin=0.2,end=0.6)+theme(legend.position='bottom')
+ 
+ggplot(prep_socio,aes(x=if_else(Voicing=='Voiced',Mean_HNR,Skewness),fill=Manner))+
+  geom_density(alpha=0.5)+facet_grid(Sex~AgeGroup+Voicing)+
+  labs(x="Metric",y="Density")+scale_fill_viridis_d(option='inferno')+theme(legend.position='bottom')
+
+```
+
+Individual ranges to see if there are any major outliers that remain after trimming procedure
+
+```{r,fig.keep='all'}
+ggplot(voiceless,aes(x=Pseudonym,y=ratio))+
+  geom_boxplot(fill=voiceless_col)+
+  labs(x="Speaker",y="Normalized Stopping Ratio\n(Skewness)")+
+  ggtitle("Voiceless")+scale_y_continuous(breaks=seq(-1,5,by=0.5))+geom_hline(yintercept=1,linetype='dashed')+
+  coord_flip()->p_voiceless_byspeaker
+ggplot(voiced,aes(x=Pseudonym,y=ratio))+
+  geom_boxplot(fill=voiced_col)+
+  labs(x="Speaker",y="Normalized Stopping Ratio\n(Mean HNR)")+
+  scale_y_continuous(breaks=seq(-1,5,by=1))+
+  ggtitle("Voiced")+geom_hline(yintercept=1,linetype='dashed')+
+  coord_flip()->p_voiced_byspeaker
+grid.arrange(p_voiceless_byspeaker,p_voiced_byspeaker,ncol=2)
+```
+
+### Basic Sociolinguistic Trends
+
+View general trends by birth year
+
+```{r}
+age_voiceless<-ggplot(voiceless,aes(x=BirthYear,y=skewness_ratio-1,linetype=Sex))+
+  geom_hline(yintercept=0,linewidth=0.5,linetype='dotted')+geom_rug(sides="br",linetype='solid')+
+  geom_smooth(aes(group=Sex),color='black',fill=voiceless_col,method='gam',formula=y~s(x,k=3,m=2))+
+  scale_fill_manual(values=c(male_col,female_col))+
+  scale_y_continuous(breaks=seq(-1.5,1.5,by=0.5))+geom_point(alpha=0.05,position=position_jitter(0.3))+
+  labs(x="Birth Year",y="Skewness Ratio\n(Deviance from 1)")+coord_cartesian(ylim=c(-1.5,1.5))+
+  ggtitle("Voiceless")+theme(legend.position='bottom',strip.text=element_text(size=15))+scale_x_continuous(expand = expansion(mult = 0.1))
+
+age_voiced<-ggplot(voiced,aes(x=BirthYear,y=HNR_ratio-1,linetype=Sex))+
+  geom_hline(yintercept=0,linewidth=0.5,linetype='dotted')+geom_rug(sides="br",linetype='solid')+
+  geom_smooth(aes(group=Sex),color='black',fill=voiced_col,method='gam',formula=y~s(x,k=3,m=2))+
+  scale_y_continuous(breaks=seq(-1.5,1.5,by=0.5))+geom_point(alpha=0.05,position=position_jitter(0.3))+
+  labs(x="Birth Year",y="HNR Ratio\n(Deviance from 1)")+
+  ggtitle("Voiced")+coord_cartesian(ylim=c(-1.5,1.5))+
+  theme(legend.position='bottom',strip.text=element_text(size=15))+scale_x_continuous(expand = expansion(mult = 0.1))
+
+grid.arrange(age_voiceless,age_voiced,ncol=2)->figure4
+print(figure4)
+```
+
+View trends by birth year, grouping by speaker
+
+```{r}
+age_voiced_byspeaker<-ggplot(voiced,aes(x=BirthYear,y=HNR_ratio))+
+  geom_hline(yintercept=1,linewidth=0.5,linetype='dotted')+
+  geom_boxplot(aes(group=Speaker),fill=voiced_col)+
+  labs(x="Birth Year",y="Normalized HNR Ratio")+ggtitle("Voiced")+
+  theme(legend.position='bottom')+scale_x_continuous(expand = expansion(mult = 0.1))+
+  facet_wrap(~Sex,ncol=1)
+
+age_voiceless_byspeaker<-ggplot(voiceless,aes(x=BirthYear,y=skewness_ratio))+
+  geom_hline(yintercept=1,linewidth=0.5,linetype='dotted')+
+  geom_boxplot(aes(group=Speaker),fill=voiceless_col)+
+  labs(x="Birth Year",y="Normalized Skewness Ratio")+ggtitle("Voiceless")+
+  theme(legend.position='bottom')+
+  scale_x_continuous(expand = expansion(mult = 0.1))+
+  facet_wrap(~Sex,ncol=1)
+
+grid.arrange(age_voiceless_byspeaker,age_voiced_byspeaker,ncol=2)
+```
+
+## Data Analysis
+
+Set Contrasts
+
+```{r}
+set_contrasts<-function(data){
+  data$Sex<-as.factor(data$Sex)
+  data$Sex<-relevel(data$Sex,ref='Male')
+  data$AgeGroup=as.factor(data$AgeGroup)
+  data$AgeGroup<-relevel(data$AgeGroup,ref="Older")
+  return(data)
+  }
+```
+
+```{r}
+voiced %<>% set_contrasts()
+voiceless %<>% set_contrasts()
+voiced$HNR_ratio_deviance=voiced$HNR_ratio-1
+voiceless$skewness_ratio_deviance=voiceless$skewness_ratio-1
+```
+
+### Run Models
+
+#### Voiceless Data
+```{r,eval=F}
+ms_prep_gamm<-stan_gamm4(skewness_ratio_deviance~Sex*BirthYear+s(BirthYear,bs='tp',by=Sex,k=3,m=2),random=~(1|Speaker),data=voiceless,adapt_delta=0.999,warmup=2000,iter=6000,chains=8)
+ms_prep_gamm_loo<-loo(ms_prep_gamm,k_threshold=0.7)
+```
+
+
+#### Voiced Data
+```{r,eval=F}
+mv_prep_gamm<-stan_gamm4(HNR_ratio_deviance~Sex*BirthYear+s(BirthYear,bs='tp',by=Sex,k=3,m=2),random=~(1|Speaker),data=voiced,adapt_delta=0.999,warmup=2000,iter=6000,chains=8)
+mv_prep_gamm_loo<-loo(mv_prep_gamm,k_threshold=0.7)
+```
+
+### View Results
+
+
+#### Model Summary
+
+##### Voiceless
+
+```{r}
+summary(ms_prep_gamm,regex_pars=regex,probs=my_probs,digits=3)
+```
+
+##### Voiced
+
+```{r}
+summary(mv_prep_gamm,regex_pars=regex,probs=my_probs,digits=3)
+
+```
+
+##### HDIs and Bayes Factors
+
+##### Voiceless
+```{r}
+hdi(ms_prep_gamm)
+bayesfactor(ms_prep_gamm)
+```
+##### Voiced
+```{r}
+hdi(mv_prep_gamm)
+bayesfactor(mv_prep_gamm)
+```
+
+##### Posterior Draws
+
+```{r,fig.keep='all'}
+color_scheme_set(c(voiceless_col,rep("#000000",5)))
+ms_prep_gamm_post<-mcmc_areas(ms_prep_gamm,regex_pars=regex,prob_outer=0.95)+ggtitle("Voiceless")
+color_scheme_set(c(voiced_col,rep("#000000",5)))
+mv_prep_gamm_post<-mcmc_areas(mv_prep_gamm,regex_pars=regex,prob_outer=0.95)+ggtitle("Voiced")
+grid.arrange(ms_prep_gamm_post,mv_prep_gamm_post,ncol=2)
+```
+
+Nonlinear Plot
+
+```{r fig.keep='all'}
+color_scheme_set(c(voiceless_col,rep("#000000",5)))
+ms_prep_gamm_nl<-plot_nonlinear(ms_prep_gamm,prob=0.95)+ggtitle("Voiceless Data")
+color_scheme_set(c(voiced_col,rep("#000000",5)))
+mv_prep_gamm_nl<-plot_nonlinear(mv_prep_gamm,prob=0.95)+ggtitle("Voiced Data")
+grid.arrange(ms_prep_gamm_nl,mv_prep_gamm_nl,ncol=1)
+```
+
+##### Region of Practical Equivalence (ROPE)
+##### Voiceless
+```{r}
+ms_prep_gamm_rope<-plot(rope(ms_prep_gamm,range=rope_range(ms_prep_gamm),ci_method='hdi'))+ggtitle("Voiceless")+scale_fill_manual(values=c(voiceless_col,voiceless_col_alt))+theme(legend.position='bottom')
+ms_prep_gamm_rope
+```
+##### Voiced
+```{r}
+mv_prep_gamm_rope<-plot(rope(mv_prep_gamm,range=rope_range(mv_prep_gamm),ci_method='hdi'))+ggtitle("Voiced")+scale_fill_manual(values=c(voiced_col,voiced_col_alt))+theme(legend.position='bottom')
+
+mv_prep_gamm_rope
+```
+
+##### Shinystan Apps (will open in new browser if code is run)
+
+Voiceless Data
+
+```{r, eval=FALSE}
+launch_shinystan(ms_prep_gamm)
+```
+
+Voiced Data
+
+```{r, eval=FALSE}
+launch_shinystan(mv_prep_gamm)
+```
+
+# Perceptual Coding
+
+## Data Processing
+
+```{r}
+perceptual_data %>% filter(Coder!="") %>%
+  mutate(token=paste(Speaker,Word,Start,End,sep="_")) %>% 
+  left_join(.,perceptual_tokens_voicing_codes,by='Word') %>% 
+  left_join(.,socio_data,by='Speaker') %>% 
+  mutate(AgeGroup=ifelse(as.numeric(BirthYear)>=1985,'Younger','Older')) %>%
+  filter(Code!="Unsure")->perceptual_dataset_raw
+perceptual_dataset_raw %<>% set_contrasts()
+```
+
+```{r}
+perceptual_dataset_raw %>% 
+  group_by(Speaker,AgeGroup,BirthYear,Sex,Voicing,Code) %>% 
+  tally() %>% pivot_wider(names_from=Code,values_from=n) %>% 
+  mutate(Total=Stop+Fricative,Stopping_Rate=100*Stop/(Total)) %>% 
+  {.->> perceptual_rates_raw} %>% print()
+```
+
+### Labov (dh) Index Comparison
+```{r}
+perceptual_data %>% filter(Coder!="") %>%
+  mutate(token=paste(Speaker,Word,Start,End,sep="_")) %>% 
+  left_join(.,perceptual_tokens_voicing_codes,by='Word') %>% 
+  left_join(.,socio_data,by='Speaker') %>% 
+  mutate(AgeGroup=ifelse(as.numeric(BirthYear)>=1985,'Younger','Older'),dh_value=case_match(Code,"Unsure"~1,"Fricative"~0,"Stop"~2)) %>% {.->>perceptual_group_level} %>%
+  group_by(AgeGroup,Sex) %>% reframe(dh_index=100*mean(dh_value))
+
+perceptual_group_level %>% 
+  group_by(Voicing,AgeGroup,Sex,Code) %>% 
+  filter(Code!="Unsure") %>%
+  tally() %>% group_by(AgeGroup,Sex,Voicing) %>% 
+  pivot_wider(names_from=Code,values_from=n) %>% 
+  mutate(Total=Stop+Fricative,Stopping_Rate=100*Stop/(Total))
+
+perceptual_group_level %>% filter(Coder!="") %>% group_by(Sex,AgeGroup) %>% reframe(count=n_distinct(Speaker))
+```
+
+### Rater Consensus
+
+Get Fleiss' Kappa for IRR
+
+```{r}
+perceptual_data %>% filter(Coder!="") %>% 
+  mutate(token=paste(Speaker,Word,Start,End,sep="_")) %>% 
+  select(token,Coder,Code) %>% 
+  pivot_wider(names_from=`Coder`,values_from=Code) %>% {. ->> perceptual_irr} %>%
+  kappam.fleiss()
+```
+
+Show tokens by level of agreement
+```{r}
+perceptual_irr %>% rowwise %>%
+        mutate(distinct = n_distinct(unlist(across(starts_with("A"))))) %>%
+        ungroup() -> perceptual_irr_agreement
+
+perceptual_irr_agreement
+```
+## Data Visualization
+
+Stopping Rates by Sex and Birth Year based on Individual Rater Score
+
+```{r}
+perceptual_voiceless_rates_raw<- perceptual_rates_raw %>%
+  filter(Voicing=="Voiceless") %>%
+  ggplot(aes(x=BirthYear,y=Stopping_Rate,linetype=Sex))+
+  geom_rug(sides="br",linetype='solid')+
+  geom_smooth(aes(group=Sex),color='black',fill=voiceless_col,method='gam',formula=y~s(x,k=3,m=2))+
+  #scale_y_continuous(breaks=seq(-1.5,1.5,by=0.5))+
+  geom_point(alpha=0.5,position=position_jitter(0.3))+
+  labs(x="Birth Year",y="Stopping Rate\n(Perceptual, by Rater)")+
+  ggtitle("Voiceless")+scale_linetype_manual(values=c(male_line,female_line))+
+  theme(legend.position='bottom',strip.text=element_text(size=15))+scale_x_continuous(expand = expansion(mult = 0.1))
+
+perceptual_voiced_rates_raw<- perceptual_rates_raw %>%
+  filter(Voicing=="Voiced") %>%
+  ggplot(aes(x=BirthYear,y=Stopping_Rate,linetype=Sex))+
+  geom_rug(sides="br",linetype='solid')+
+  geom_smooth(aes(group=Sex),color='black',fill=voiced_col,method='gam',formula=y~s(x,k=3,m=2))+
+  geom_point(alpha=0.5,position=position_jitter(0.3,0.3))+
+  labs(x="Birth Year",y="Stopping Rate\n(Perceptual, by Rater)")+
+  ggtitle("Voiced")+scale_linetype_manual(values=c(male_line,female_line))+
+  theme(legend.position='bottom',strip.text=element_text(size=15))+scale_x_continuous(expand = expansion(mult = 0.1))
+
+grid.arrange(perceptual_voiceless_rates_raw,perceptual_voiced_rates_raw,ncol=2)
+```
+
+
+## Data Analysis
+
+### Run Models
+
+Force outcome variable to be factor for binomial gam
+
+```{r}
+perceptual_dataset_raw$Code %<>% as.factor()
+```
+
+#### Voiceless Data
+
+```{r,eval=F}
+ms_per_raw_gamm<-stan_gamm4(Code~BirthYear*Sex+s(BirthYear,by=Sex,k=3,m=2,bs='tp'),random=~(1|Speaker),data=subset(perceptual_dataset_raw,Voicing=="Voiceless"),family='binomial',adapt_delta=0.999,warmup=2000,iter=6000,chains=8)
+
+ms_per_raw_gamm_loo<-loo(ms_per_raw_gamm)
+```
+
+#### Voiced Data
+
+```{r,eval=FALSE}
+mv_per_raw_gamm<-stan_gamm4(Code~BirthYear*Sex+s(BirthYear,by=Sex,k=3,m=2,bs='tp'),random=~(1|Speaker),data=subset(perceptual_dataset_raw,Voicing=="Voiced"),family='binomial',adapt_delta=0.999,warmup=2000,iter=6000,chains=8)
+mv_per_raw_gamm_loo<-loo(mv_per_raw_gamm,k_threshold=0.7)
+```
+
+
+### View Results
+
+#### Model Summary
+
+##### Voiceless Data
+
+```{r}
+summary(ms_per_raw_gamm,probs=my_probs,regex_pars=regex,digits=3)
+```
+
+##### Voiced Data
+
+```{r}
+summary(mv_per_raw_gamm,probs=my_probs,regex_pars=regex,digits=3)
+```
+
+#### Nonlinear Plot
+
+```{r fig.keep='all'}
+color_scheme_set(c(voiceless_col,rep("#000000",5)))
+ms_per_raw_gamm_nl<-plot_nonlinear(ms_per_raw_gamm,prob=0.95)+ggtitle("Voiceless Data")
+color_scheme_set(c(voiced_col,rep("#000000",5)))
+mv_per_raw_gamm_nl<-plot_nonlinear(mv_per_raw_gamm,prob=0.95)+ggtitle("Voiced Data")
+grid.arrange(ms_per_raw_gamm_nl,mv_per_raw_gamm_nl,ncol=1)
+```
+
+#### HDI and Bayes Factors
+
+##### Voiceless Data
+```{r}
+hdi(ms_per_raw_gamm)
+bayesfactor(ms_per_raw_gamm)
+rope(ms_per_raw_gamm,range=rope_range(ms_per_raw_gamm),ci_method='hdi',ci=0.95)
+```
+
+#### Voiced Data
+```{r}
+hdi(mv_per_raw_gamm)
+bayesfactor(mv_per_raw_gamm)
+rope(mv_per_raw_gamm,range=rope_range(mv_per_raw_gamm),ci_method='hdi',ci=0.95)
+```
+#### Posterior Draws
+
+```{r}
+color_scheme_set(c(voiceless_col,rep("#000000",5)))
+ms_per_raw_post<-mcmc_areas(ms_per_raw,regex_pars=regex,prob_outer=0.95)+ggtitle("Voiceless")
+color_scheme_set(c(voiced_col,rep("#000000",5)))
+mv_per_raw_post<-mcmc_areas(mv_per_raw,regex_pars=regex,prob_outer=0.95)+ggtitle("Voiced")
+grid.arrange(ms_per_raw_post,mv_per_raw_post,ncol=1)
+```
+
+#### Region of Practical Equivalence (ROPE)
+
+```{r}
+ms_per_raw_rope<-plot(rope(ms_per_raw,range=rope_range(ms_per_raw)))+ggtitle("Voiceless")+scale_fill_manual(values=c(voiceless_col,voiceless_col_alt))
+mv_per_raw_rope<-plot(rope(mv_per_raw,range=rope_range(mv_per_raw)))+ggtitle("Voiced")+scale_fill_manual(values=c(voiced_col,voiced_col_alt))
+grid.arrange(ms_per_raw_rope,mv_per_raw_rope,ncol=1)
+```
+
+##### Shinystan Apps (will open in new browser if code is run)
+
+Voiceless Data
+
+```{r,eval=F}
+launch_shinystan(ms_per_raw)
+```
+
+Voiced Data
+
+```{r,eval=F}
+launch_shinystan(mv_per_raw)
+```
+
+
+```{r}
+#save.image('../Data/all_models_final.RData')
+```
