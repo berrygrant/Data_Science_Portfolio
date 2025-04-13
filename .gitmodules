@@ -1,0 +1,3 @@
+[submodule "Translation_App"]
+	path = Translation_App
+	url = https://github.com/berrygrant/Translation_App.git
